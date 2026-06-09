@@ -2,7 +2,8 @@ import random
 import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from typing import Self
+from typing_extensions import Self
+from exceptiongroup import ExceptionGroup
 import logging
 
 from app.core.models import (
@@ -78,10 +79,7 @@ class StockDataService:
         except Exception as e:
             errors.append(RuntimeError(f"load alerts: {e}"))
         if errors:
-            try:
-                raise ExceptionGroup("Redis load errors", errors)
-            except ExceptionGroup as eg:
-                logger.warning("_load_from_redis had %d sub-errors", len(eg.exceptions))
+            raise ExceptionGroup("Redis load errors", errors)
 
     async def _save_to_redis(self) -> None:
         errors: List[Exception] = []
@@ -96,10 +94,7 @@ class StockDataService:
             except Exception as e:
                 errors.append(RuntimeError(f"save alert {alert_id}: {e}"))
         if errors:
-            try:
-                raise ExceptionGroup("Redis save errors", errors)
-            except ExceptionGroup as eg:
-                logger.warning("_save_to_redis had %d sub-errors", len(eg.exceptions))
+            raise ExceptionGroup("Redis save errors", errors)
 
     def get_all_stocks(self) -> List[StockInfo]:
         return STOCKS_DATA
@@ -262,17 +257,16 @@ class StockDataService:
     def generate_kline_history(
         self, symbol: str, interval: KlineInterval, limit: int = 200
     ) -> List[KlineData]:
-        match interval:
-            case KlineInterval.MINUTE:
-                return self._generate_kline_minutes(symbol, min(limit, 240))
-            case KlineInterval.DAY:
-                return self._generate_kline_days(symbol, min(limit, 365))
-            case KlineInterval.WEEK:
-                return self._generate_kline_weeks(symbol, min(limit, 104))
-            case KlineInterval.MONTH:
-                return self._generate_kline_months(symbol, min(limit, 60))
-            case _:
-                return []
+        if interval == KlineInterval.MINUTE:
+            return self._generate_kline_minutes(symbol, min(limit, 240))
+        elif interval == KlineInterval.DAY:
+            return self._generate_kline_days(symbol, min(limit, 365))
+        elif interval == KlineInterval.WEEK:
+            return self._generate_kline_weeks(symbol, min(limit, 104))
+        elif interval == KlineInterval.MONTH:
+            return self._generate_kline_months(symbol, min(limit, 60))
+        else:
+            return []
 
     def generate_order_book(self, symbol: str) -> OrderBook:
         state = self._stock_state.get(symbol)
@@ -340,13 +334,10 @@ class StockDataService:
             if alert.symbol != symbol or alert.triggered:
                 continue
             triggered = False
-            match alert.condition:
-                case "gt" if current_price >= alert.target_price:
-                    triggered = True
-                case "lt" if current_price <= alert.target_price:
-                    triggered = True
-                case _:
-                    pass
+            if alert.condition == "gt" and current_price >= alert.target_price:
+                triggered = True
+            elif alert.condition == "lt" and current_price <= alert.target_price:
+                triggered = True
             if triggered:
                 alert.triggered = True
                 await redis_client.hset_json("stock:alerts", alert_id, alert.model_dump())
@@ -370,10 +361,7 @@ class StockDataService:
                 except Exception as e:
                     cb_errors.append(RuntimeError(f"callback {callback.__name__}: {e}"))
         if cb_errors:
-            try:
-                raise ExceptionGroup("alert callback errors", cb_errors)
-            except ExceptionGroup as eg:
-                logger.error("_check_alerts had %d callback errors", len(eg.exceptions))
+            raise ExceptionGroup("alert callback errors", cb_errors)
 
     def register_alert_callback(self, callback) -> None:
         self._alert_callbacks.append(callback)

@@ -2,7 +2,8 @@ import asyncio
 import json
 import logging
 from typing import Dict, Set, List, Optional
-from typing import Self
+from typing_extensions import Self
+from exceptiongroup import ExceptionGroup
 from fastapi import WebSocket
 
 from app.services.stock_service import stock_service
@@ -68,13 +69,13 @@ class ConnectionManager:
                 for syms in self._connections.values():
                     all_symbols.update(syms)
                 quotes: Dict[str, dict] = {}
-                errors: List[Exception] = []
+                quote_errors: List[Exception] = []
                 for symbol in all_symbols:
                     try:
                         quote = await stock_service.generate_quote(symbol)
                         quotes[symbol] = quote.model_dump()
                     except Exception as e:
-                        errors.append(RuntimeError(f"quote {symbol}: {e}"))
+                        quote_errors.append(RuntimeError(f"quote {symbol}: {e}"))
                 send_errors: List[Exception] = []
                 for ws, subs in self._connections.items():
                     for symbol in subs:
@@ -86,15 +87,21 @@ class ConnectionManager:
                                 })
                             except Exception as e:
                                 send_errors.append(RuntimeError(f"send {symbol}->ws: {e}"))
-                all_errors = errors + send_errors
+                all_errors = quote_errors + send_errors
                 if all_errors:
-                    try:
-                        raise ExceptionGroup("broadcast batch errors", all_errors)
-                    except ExceptionGroup as eg:
-                        logger.warning("Broadcast encountered %d sub-errors", len(eg.exceptions))
+                    raise ExceptionGroup("broadcast batch errors", all_errors)
                 await asyncio.sleep(settings.PUSH_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Broadcast loop cancelled cleanly")
+            raise
+        except ExceptionGroup as eg:
+            for sub_e in eg.exceptions:
+                logger.warning("Broadcast sub-error: %s", sub_e)
+            await asyncio.sleep(settings.PUSH_INTERVAL)
+            if not self._broadcast_task.cancelled():
+                raise asyncio.CancelledError() from eg
+        except Exception as e:
+            logger.error("Broadcast loop fatal error: %s", e)
             raise
 
     async def _send_alert_notification(self, notification) -> None:
@@ -107,10 +114,7 @@ class ConnectionManager:
                 except Exception as e:
                     send_errors.append(RuntimeError(f"alert push: {e}"))
         if send_errors:
-            try:
-                raise ExceptionGroup("alert push errors", send_errors)
-            except ExceptionGroup as eg:
-                logger.warning("Alert push encountered %d sub-errors", len(eg.exceptions))
+            raise ExceptionGroup("alert push errors", send_errors)
 
     def active_connections_count(self) -> int:
         return len(self._connections)

@@ -91,6 +91,8 @@ async def health():
         "status": "healthy" if redis_available else "degraded",
         "components": {
             "redis": "connected" if redis_available else "disconnected (fallback mode)",
-            "websocket_connections": manager.active_connections_count()
+            "websocket_connections": manager.active_connections_count(),
+            "broadcast_running": manager.is_broadcast_running,
+            "broadcast_task_id": id(manager._broadcast_task) if manager._broadcast_task else None
         }
     }

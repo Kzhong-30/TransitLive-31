@@ -1,6 +1,5 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
-from typing import Self
 import json
 import logging
 
@@ -49,37 +48,37 @@ async def websocket_endpoint(
             try:
                 data = json.loads(raw_data)
                 msg_type = data.get("type")
-                match msg_type:
-                    case "subscribe":
-                        symbols = data.get("symbols", [])
-                        if isinstance(symbols, list):
-                            subscribed = manager.subscribe(websocket, symbols)
-                            await websocket.send_json({
-                                "type": "subscribed",
-                                "symbols": subscribed,
-                                "message": f"已订阅 {len(subscribed)} 支股票"
-                            })
-                    case "unsubscribe":
-                        symbols = data.get("symbols", [])
-                        if isinstance(symbols, list):
-                            manager.unsubscribe(websocket, symbols)
-                            await websocket.send_json({
-                                "type": "unsubscribed",
-                                "symbols": symbols,
-                                "message": "已取消订阅"
-                            })
-                    case "ping":
-                        await websocket.send_json({"type": "pong"})
-                    case None:
+                if msg_type is None:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "缺少 type 字段"
+                    })
+                elif msg_type == "subscribe":
+                    symbols = data.get("symbols", [])
+                    if isinstance(symbols, list):
+                        subscribed = manager.subscribe(websocket, symbols)
                         await websocket.send_json({
-                            "type": "error",
-                            "message": "缺少 type 字段"
+                            "type": "subscribed",
+                            "symbols": subscribed,
+                            "message": f"已订阅 {len(subscribed)} 支股票"
                         })
-                    case _ as unknown:
+                elif msg_type == "unsubscribe":
+                    symbols = data.get("symbols", [])
+                    if isinstance(symbols, list):
+                        manager.unsubscribe(websocket, symbols)
                         await websocket.send_json({
-                            "type": "error",
-                            "message": f"未知消息类型: {unknown}"
+                            "type": "unsubscribed",
+                            "symbols": symbols,
+                            "message": "已取消订阅"
                         })
+                elif msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                else:
+                    unknown = msg_type
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"未知消息类型: {unknown}"
+                    })
             except json.JSONDecodeError:
                 await websocket.send_json({
                     "type": "error",
