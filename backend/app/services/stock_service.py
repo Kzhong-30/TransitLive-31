@@ -2,6 +2,7 @@ import random
 import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+from typing import Self
 import logging
 
 from app.core.models import (
@@ -33,18 +34,18 @@ STOCKS_DATA: List[StockInfo] = [
 
 
 class StockDataService:
-    _instance = None
+    _instance: Optional[Self] = None
     _stock_state: Dict[str, Dict] = {}
     _alerts: Dict[str, Alert] = {}
     _alert_callbacks = []
 
-    def __new__(cls):
+    def __new__(cls) -> Self:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._init_stock_state()
         return cls._instance
 
-    def _init_stock_state(self):
+    def _init_stock_state(self) -> None:
         for stock in STOCKS_DATA:
             base = stock.base_price
             volatility = 0.005
@@ -60,21 +61,45 @@ class StockDataService:
             }
         self._alerts = {}
 
-    async def _load_from_redis(self):
+    async def _load_from_redis(self) -> None:
+        errors: List[Exception] = []
         for stock in STOCKS_DATA:
-            key = f"stock:state:{stock.symbol}"
-            state = await redis_client.get_json(key)
-            if state:
-                self._stock_state[stock.symbol] = state
-        alerts_data = await redis_client.hgetall_json("stock:alerts")
-        for k, v in alerts_data.items():
-            self._alerts[k] = Alert(**v)
+            try:
+                key = f"stock:state:{stock.symbol}"
+                state = await redis_client.get_json(key)
+                if state:
+                    self._stock_state[stock.symbol] = state
+            except Exception as e:
+                errors.append(RuntimeError(f"load state {stock.symbol}: {e}"))
+        try:
+            alerts_data = await redis_client.hgetall_json("stock:alerts")
+            for k, v in alerts_data.items():
+                self._alerts[k] = Alert(**v)
+        except Exception as e:
+            errors.append(RuntimeError(f"load alerts: {e}"))
+        if errors:
+            try:
+                raise ExceptionGroup("Redis load errors", errors)
+            except ExceptionGroup as eg:
+                logger.warning("_load_from_redis had %d sub-errors", len(eg.exceptions))
 
-    async def _save_to_redis(self):
+    async def _save_to_redis(self) -> None:
+        errors: List[Exception] = []
         for symbol, state in self._stock_state.items():
-            await redis_client.set_json(f"stock:state:{symbol}", state, ex=3600)
+            try:
+                await redis_client.set_json(f"stock:state:{symbol}", state, ex=3600)
+            except Exception as e:
+                errors.append(RuntimeError(f"save state {symbol}: {e}"))
         for alert_id, alert in self._alerts.items():
-            await redis_client.hset_json("stock:alerts", alert_id, alert.model_dump())
+            try:
+                await redis_client.hset_json("stock:alerts", alert_id, alert.model_dump())
+            except Exception as e:
+                errors.append(RuntimeError(f"save alert {alert_id}: {e}"))
+        if errors:
+            try:
+                raise ExceptionGroup("Redis save errors", errors)
+            except ExceptionGroup as eg:
+                logger.warning("_save_to_redis had %d sub-errors", len(eg.exceptions))
 
     def get_all_stocks(self) -> List[StockInfo]:
         return STOCKS_DATA
@@ -237,16 +262,17 @@ class StockDataService:
     def generate_kline_history(
         self, symbol: str, interval: KlineInterval, limit: int = 200
     ) -> List[KlineData]:
-        cache_key = f"stock:kline:{symbol}:{interval.value}"
-        if interval == KlineInterval.MINUTE:
-            return self._generate_kline_minutes(symbol, min(limit, 240))
-        elif interval == KlineInterval.DAY:
-            return self._generate_kline_days(symbol, min(limit, 365))
-        elif interval == KlineInterval.WEEK:
-            return self._generate_kline_weeks(symbol, min(limit, 104))
-        elif interval == KlineInterval.MONTH:
-            return self._generate_kline_months(symbol, min(limit, 60))
-        return []
+        match interval:
+            case KlineInterval.MINUTE:
+                return self._generate_kline_minutes(symbol, min(limit, 240))
+            case KlineInterval.DAY:
+                return self._generate_kline_days(symbol, min(limit, 365))
+            case KlineInterval.WEEK:
+                return self._generate_kline_weeks(symbol, min(limit, 104))
+            case KlineInterval.MONTH:
+                return self._generate_kline_months(symbol, min(limit, 60))
+            case _:
+                return []
 
     def generate_order_book(self, symbol: str) -> OrderBook:
         state = self._stock_state.get(symbol)
@@ -308,16 +334,19 @@ class StockDataService:
             return True
         return False
 
-    async def _check_alerts(self, symbol: str, current_price: float):
+    async def _check_alerts(self, symbol: str, current_price: float) -> None:
         notifications = []
         for alert_id, alert in list(self._alerts.items()):
             if alert.symbol != symbol or alert.triggered:
                 continue
             triggered = False
-            if alert.condition == "gt" and current_price >= alert.target_price:
-                triggered = True
-            elif alert.condition == "lt" and current_price <= alert.target_price:
-                triggered = True
+            match alert.condition:
+                case "gt" if current_price >= alert.target_price:
+                    triggered = True
+                case "lt" if current_price <= alert.target_price:
+                    triggered = True
+                case _:
+                    pass
             if triggered:
                 alert.triggered = True
                 await redis_client.hset_json("stock:alerts", alert_id, alert.model_dump())
@@ -333,14 +362,20 @@ class StockDataService:
                 notifications.append(notification)
                 logger.info(f"Alert triggered: {alert_id} for {symbol} at {current_price}")
 
+        cb_errors: List[Exception] = []
         for notification in notifications:
             for callback in self._alert_callbacks:
                 try:
                     await callback(notification)
                 except Exception as e:
-                    logger.error(f"Error in alert callback: {e}")
+                    cb_errors.append(RuntimeError(f"callback {callback.__name__}: {e}"))
+        if cb_errors:
+            try:
+                raise ExceptionGroup("alert callback errors", cb_errors)
+            except ExceptionGroup as eg:
+                logger.error("_check_alerts had %d callback errors", len(eg.exceptions))
 
-    def register_alert_callback(self, callback):
+    def register_alert_callback(self, callback) -> None:
         self._alert_callbacks.append(callback)
 
 
